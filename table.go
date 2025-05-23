@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Table provides CRUD operations for a specific Supabase table.
@@ -35,6 +36,21 @@ type simpleFilter struct {
 func (f simpleFilter) toQuery() string {
 	if f.value == nil {
 		return fmt.Sprintf("%s.is.null", f.field)
+	}
+	// If value is a pointer and nil, treat as is.null
+	switch v := f.value.(type) {
+	case *string:
+		if v == nil {
+			return fmt.Sprintf("%s.is.null", f.field)
+		}
+	case *int:
+		if v == nil {
+			return fmt.Sprintf("%s.is.null", f.field)
+		}
+	case *time.Time:
+		if v == nil {
+			return fmt.Sprintf("%s.is.null", f.field)
+		}
 	}
 	if f.op == "in" {
 		return fmt.Sprintf("%s.in.%v", f.field, f.value)
@@ -83,7 +99,33 @@ func ILike(field string, pattern string) Filter {
 func In(field string, values []interface{}) Filter {
 	var strVals []string
 	for _, v := range values {
-		strVals = append(strVals, fmt.Sprintf("%v", v))
+		// If v is nil or a nil pointer, use null
+		if v == nil {
+			strVals = append(strVals, "null")
+			continue
+		}
+		switch vv := v.(type) {
+		case *string:
+			if vv == nil {
+				strVals = append(strVals, "null")
+				continue
+			}
+			strVals = append(strVals, *vv)
+		case *int:
+			if vv == nil {
+				strVals = append(strVals, "null")
+				continue
+			}
+			strVals = append(strVals, fmt.Sprintf("%d", *vv))
+		case *time.Time:
+			if vv == nil {
+				strVals = append(strVals, "null")
+				continue
+			}
+			strVals = append(strVals, vv.Format(time.RFC3339Nano))
+		default:
+			strVals = append(strVals, fmt.Sprintf("%v", v))
+		}
 	}
 	joined := strings.Join(strVals, ",")
 	return simpleFilter{field, "in", fmt.Sprintf("(%s)", joined)}
@@ -117,18 +159,20 @@ func (t *Table) AddFilter(f Filter) *Table {
 
 // Keep Eq, Gt, etc. for backward compatibility
 func (t *Table) Eq(field string, value interface{}) *Table { return t.AddFilter(Eq(field, value)) }
-func (t *Table) NotEq(field string, value interface{}) *Table { return t.AddFilter(NotEq(field, value)) }
-func (t *Table) Gt(field string, value interface{}) *Table { return t.AddFilter(Gt(field, value)) }
-func (t *Table) Lt(field string, value interface{}) *Table { return t.AddFilter(Lt(field, value)) }
-func (t *Table) Gte(field string, value interface{}) *Table { return t.AddFilter(Gte(field, value)) }
-func (t *Table) Lte(field string, value interface{}) *Table { return t.AddFilter(Lte(field, value)) }
-func (t *Table) Like(field string, pattern string) *Table { return t.AddFilter(Like(field, pattern)) }
-func (t *Table) ILike(field string, pattern string) *Table { return t.AddFilter(ILike(field, pattern)) }
+func (t *Table) NotEq(field string, value interface{}) *Table {
+	return t.AddFilter(NotEq(field, value))
+}
+func (t *Table) Gt(field string, value interface{}) *Table    { return t.AddFilter(Gt(field, value)) }
+func (t *Table) Lt(field string, value interface{}) *Table    { return t.AddFilter(Lt(field, value)) }
+func (t *Table) Gte(field string, value interface{}) *Table   { return t.AddFilter(Gte(field, value)) }
+func (t *Table) Lte(field string, value interface{}) *Table   { return t.AddFilter(Lte(field, value)) }
+func (t *Table) Like(field string, pattern string) *Table     { return t.AddFilter(Like(field, pattern)) }
+func (t *Table) ILike(field string, pattern string) *Table    { return t.AddFilter(ILike(field, pattern)) }
 func (t *Table) In(field string, values []interface{}) *Table { return t.AddFilter(In(field, values)) }
 
 // And/Or as chainable methods
 func (t *Table) And(filters ...Filter) *Table { return t.AddFilter(And(filters...)) }
-func (t *Table) Or(filters ...Filter) *Table { return t.AddFilter(Or(filters...)) }
+func (t *Table) Or(filters ...Filter) *Table  { return t.AddFilter(Or(filters...)) }
 
 // Limit sets the maximum number of records to return.
 func (t *Table) Limit(n int) *Table {
@@ -160,10 +204,17 @@ func (t *Table) SelectColumns(cols ...string) *Table {
 
 // Select fetches records from the table into dest (must be a pointer to a slice).
 func (t *Table) Select(dest interface{}, jwtToken string) error {
-	// Build the query string
 	params := url.Values{}
 	for _, f := range t.filters {
-		params.Add("or", f.toQuery())
+		switch filter := f.(type) {
+		case simpleFilter:
+			if filter.value == nil {
+				continue // ✅ Skip nils
+			}
+			params.Add(filter.field, fmt.Sprintf("%s.%v", filter.op, filter.value))
+		case groupFilter:
+			params.Add(filter.operator, filter.toQuery()[len(filter.operator)+1:]) // remove operator prefix
+		}
 	}
 	if t.limit > 0 {
 		params.Add("limit", fmt.Sprintf("%d", t.limit))
@@ -212,32 +263,47 @@ func (t *Table) Select(dest interface{}, jwtToken string) error {
 }
 
 // Insert inserts one or more records into the table.
-func (t *Table) Insert(records interface{}, jwtToken string) error {
+func (t *Table) Insert(record interface{}, jwtToken string) error {
 	endpoint := fmt.Sprintf("%s%s/%s", t.client.BaseURL, REST_URL, t.tableName)
-	b, err := json.Marshal(records)
+
+	fmt.Printf("Endpoint: %s\n", endpoint)
+
+	b, err := json.Marshal(record)
+	fmt.Printf("Record: %s\n", string(b))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal record: %w", err)
 	}
+
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(b))
+
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create request: %w", err)
 	}
+
 	req.Header.Set("apikey", t.client.APIKey)
 	if jwtToken != "" {
 		req.Header.Set("Authorization", "Bearer "+jwtToken)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=representation") // Return inserted rows
+	req.Header.Set("Prefer", "return=representation") // ✅ Return inserted row(s)
 
 	resp, err := t.client.Do(req)
+
 	if err != nil {
-		return err
+		return fmt.Errorf("insert request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("supabase: insert failed: %s", string(body))
 	}
+
+	// Decode the response back into the provided pointer
+	if err := json.NewDecoder(resp.Body).Decode(record); err != nil {
+		return fmt.Errorf("failed to decode insert response: %w", err)
+	}
+
 	return nil
 }
 
@@ -245,7 +311,12 @@ func (t *Table) Insert(records interface{}, jwtToken string) error {
 func (t *Table) Update(values map[string]interface{}, jwtToken string) error {
 	params := url.Values{}
 	for _, f := range t.filters {
-		params.Add("or", f.toQuery())
+		switch filter := f.(type) {
+		case simpleFilter:
+			params.Add(filter.field, fmt.Sprintf("%s.%v", filter.op, filter.value))
+		case groupFilter:
+			params.Add(filter.operator, filter.toQuery()[len(filter.operator)+1:])
+		}
 	}
 	endpoint := fmt.Sprintf("%s%s/%s", t.client.BaseURL, REST_URL, t.tableName)
 	if len(params) > 0 {

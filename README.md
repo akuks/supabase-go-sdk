@@ -7,6 +7,8 @@ A Go SDK for interacting with the Supabase REST API, inspired by the official JS
 - Generic table CRUD operations (insert, select, update, delete)
 - Chainable query builder for filters, ordering, pagination
 - JWT and API key support for RLS
+- **Automatic decoding of inserted rows with DB-generated fields (UUIDs, timestamps, etc.)**
+- **Correct handling of nullable fields and nil values in filters and inserts**
 
 ## Getting Started
 
@@ -24,14 +26,19 @@ client := supabasego.NewClient(cfg)
 
 ### Usage Examples
 
-### Insert
+### Insert (with DB-generated fields)
 ```go
-// Insert a new tenant
-newTenant := Tenant{ID: "t1", Name: "Acme"}
-err := client.Table("tenants").Insert(newTenant, jwtToken)
+// Insert a new agent/tenant; let DB generate UUIDs and timestamps
+newAgent := Agent{
+    Name: "Example Agent",
+    // ID: nil (omit), DB will generate
+}
+var inserted []Agent
+err := client.Table("agents").Insert(&[]Agent{newAgent}, jwtToken)
 if err != nil {
     // handle error
 }
+// inserted[0] now contains all DB-generated fields (id, created_at, etc.)
 ```
 
 ### Select
@@ -78,6 +85,73 @@ if err != nil {
 - The `Select` method decodes JSON directly into your slice.
 
 ## Advanced Query Builder Usage
+
+### Ordering Results
+```go
+var tenants []Tenant
+err := client.Table("tenants").
+    OrderBy("created_at", "desc").
+    Select(&tenants, jwtToken)
+```
+
+### Pagination (Offset & Limit)
+```go
+var tenants []Tenant
+err := client.Table("tenants").
+    Offset(10).
+    Limit(5).
+    Select(&tenants, jwtToken)
+```
+
+### Selecting Specific Columns
+```go
+var tenants []Tenant
+err := client.Table("tenants").
+    SelectColumns("id", "name", "plan").
+    Select(&tenants, jwtToken)
+```
+
+### Filtering Examples
+
+#### Equality and Not Equal
+```go
+// Find all tenants with plan 'pro', but not deleted
+var tenants []Tenant
+err := client.Table("tenants").
+    Eq("plan", "pro").
+    NotEq("deleted_at", nil).
+    Select(&tenants, jwtToken)
+```
+
+#### Handling NULL and nil values
+- When using filters like `.Eq("deleted_at", nil)` or `.NotEq("deleted_at", nil)`, the SDK will generate correct `is.null` or `not.is.null` queries.
+- The SDK will never send the string `"<nil>"` to Postgres.
+- For `IN` filters, nil values in the slice are encoded as `null`.
+
+#### In (matching any value in a slice)
+```go
+// Find tenants with plan 'pro' or 'enterprise', or where deleted_at is null
+var tenants []Tenant
+plans := []interface{}{ "pro", "enterprise" }
+err := client.Table("tenants").
+    In("plan", plans).
+    In("deleted_at", []interface{}{nil}).
+    Select(&tenants, jwtToken)
+```
+
+### Insert: Best Practice for DB Defaults
+- Omit fields like `id`, `created_at`, etc. from your struct or set them to `nil`/zero.
+- The SDK will omit them from JSON, letting the DB generate values.
+- After insert, the returned slice will contain the full DB row(s).
+
+### Error Handling
+- All CRUD methods return errors on failure.
+- Common Supabase/PostgREST error messages are surfaced directly.
+
+### Compatibility Notes
+- `Insert` now supports returning DB-generated fields when passed a pointer to a slice.
+- Filters handle nils and pointers correctly; no more invalid timestamp errors.
+- Single-record select logic is unchanged; you can still fetch by ID as before.
 
 ### Ordering Results
 ```go
