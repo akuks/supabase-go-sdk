@@ -209,7 +209,7 @@ func (t *Table) Select(dest interface{}, jwtToken string) error {
 		switch filter := f.(type) {
 		case simpleFilter:
 			if filter.value == nil {
-				continue // ✅ Skip nils
+				continue //
 			}
 			params.Add(filter.field, fmt.Sprintf("%s.%v", filter.op, filter.value))
 		case groupFilter:
@@ -285,7 +285,7 @@ func (t *Table) Insert(record interface{}, jwtToken string) error {
 		req.Header.Set("Authorization", "Bearer "+jwtToken)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=representation") // ✅ Return inserted row(s)
+	req.Header.Set("Prefer", "return=representation") //
 
 	resp, err := t.client.Do(req)
 
@@ -307,8 +307,8 @@ func (t *Table) Insert(record interface{}, jwtToken string) error {
 	return nil
 }
 
-// Update updates records matching filters with given values.
-func (t *Table) Update(values map[string]interface{}, jwtToken string) error {
+// Update updates records matching filters with given values and decodes the updated rows into dest.
+func (t *Table) Update(values map[string]interface{}, dest interface{}, jwtToken string) error {
 	params := url.Values{}
 	for _, f := range t.filters {
 		switch filter := f.(type) {
@@ -318,35 +318,41 @@ func (t *Table) Update(values map[string]interface{}, jwtToken string) error {
 			params.Add(filter.operator, filter.toQuery()[len(filter.operator)+1:])
 		}
 	}
+
 	endpoint := fmt.Sprintf("%s%s/%s", t.client.BaseURL, REST_URL, t.tableName)
 	if len(params) > 0 {
 		endpoint += "?" + params.Encode()
 	}
+
 	b, err := json.Marshal(values)
 	if err != nil {
 		return err
 	}
+
 	req, err := http.NewRequest("PATCH", endpoint, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
+
 	req.Header.Set("apikey", t.client.APIKey)
 	if jwtToken != "" {
 		req.Header.Set("Authorization", "Bearer "+jwtToken)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=representation") // Return updated rows
+	req.Header.Set("Prefer", "return=representation") //
 
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("supabase: update failed: %s", string(body))
 	}
-	return nil
+
+	return json.NewDecoder(resp.Body).Decode(dest)
 }
 
 // Delete deletes records matching filters from the table.
